@@ -49,14 +49,7 @@ resource "aws_route53_record" "chef_server" {
   name    = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-chef"
   type    = "A"
   ttl     = "60"
-  records = ["${aws_eip.chef_server_eip.public_ip}"]
-}
-
-# Chef server Elastic IP
-resource "aws_eip" "chef_server_eip" {
-  instance = "${aws_instance.chef_server.id}"
-  depends_on = ["aws_instance.chef_server"]
-  vpc      = true
+  records = ["${aws_instance.chef_server.public_ip}"]
 }
 
 # Set up Chef Server's dna.json
@@ -76,6 +69,14 @@ data "template_file" "local_root_client" {
     chef_user = "${var.chef_user["username"]}"
     org_short_name = "${var.chef_org["short_name"]}"
 
+  }
+}
+
+# Set up certgen.conf
+data "template_file" "chef_server_certgen_conf" {
+  template = "${file("${path.module}/files/certgen.conf.tpl")}"
+  vars = {
+    fqdn = "${aws_route53_record.chef_server.fqdn}"
   }
 }
 
@@ -113,9 +114,10 @@ resource "null_resource" "chef_preparation" {
     }
 
     connection {
-      host        ="${aws_eip.chef_server_eip.public_ip}"
-      user           = "centos"
-      private_key    = "${file("${var.instance_key}")}"
+      host        ="${aws_instance.chef_server.public_ip}"
+      user        = "centos"
+      agent       = true
+      #private_key = "${file("${var.instance_key}")}"
       }
 
     # Write .chef/dna.json for chef-solo run
@@ -130,13 +132,19 @@ resource "null_resource" "chef_preparation" {
       destination    = "/tmp/local_root_client.rb"
     }
 
+    # Write certgen.conf
+    provisioner "file" {
+      content        = "${data.template_file.chef_server_certgen_conf.rendered}"
+      destination    = "/tmp/certgen.conf"
+    }
+
   # Install Chef Server
   provisioner "remote-exec" {
     inline = [
       "sudo yum install wget -y",
       "sudo mkdir /opt/chef-ssl && sudo chmod 755 /opt/chef-ssl",
       "cd /opt/chef-ssl",
-      "sudo openssl req -x509 -newkey rsa:4096 -keyout chef_server.key -out chef_server.pem -nodes -days 365 -subj '/C=US/ST=WA/O=Chef Software/CN=${aws_route53_record.chef_server.fqdn}'",
+      "sudo openssl req -new -x509 -nodes -keyout chef_server.key -out chef_server.pem -config /tmp/certgen.conf",
       "sudo chmod 600 /opt/chef-ssl/chef_server.pem /opt/chef-ssl/chef_server.key",
       "curl -L https://www.chef.io/chef/install.sh | sudo bash",
       "sudo mkdir -p /var/chef/cache /var/chef/cookbooks",
@@ -170,9 +178,10 @@ resource "null_resource" "chef_preparation" {
 resource "null_resource" "deposit_reporting_token" {
   depends_on = [ "null_resource.harvest_reporting_token", "null_resource.chef_preparation" ]
   connection {
-    host        ="${aws_eip.chef_server_eip.public_ip}"
-    user           = "centos"
-    private_key    = "${file("${var.instance_key}")}"
+    host        ="${aws_instance.chef_server.public_ip}"
+    user        = "centos"
+    agent       = true
+    #private_key = "${file("${var.instance_key}")}"
     }
 
     # Deposit reporting token
@@ -202,17 +211,18 @@ resource "null_resource" "deposit_reporting_token" {
     count = var.harvest_key ? 1 : 0
     depends_on = [ "null_resource.chef_preparation" ]
     connection {
-      host        ="${aws_eip.chef_server_eip.public_ip}"
-      user           = "centos"
-      private_key    = "${file("${var.instance_key}")}"
+      host        ="${aws_instance.chef_server.public_ip}"
+      user        = "centos"
+      agent       = true
+      #private_key = "${file("${var.instance_key}")}"
       }
 
       # Harvest keys
       provisioner "local-exec" {
-        command = "rsync -a -e \"ssh -i ${var.instance_key} -o StrictHostKeyChecking=no\" --rsync-path=\"sudo rsync\" centos@${aws_eip.chef_server_eip.public_ip}:/opt/chef-keys/${var.chef_user["username"]}.pem ${var.local_keys_directory}/${aws_route53_record.chef_server.fqdn}-${var.chef_user["username"]}.pem"
+        command = "rsync -a -e \"ssh -i ${var.instance_key} -o StrictHostKeyChecking=no\" --rsync-path=\"sudo rsync\" centos@${aws_instance.chef_server.public_ip}:/opt/chef-keys/${var.chef_user["username"]}.pem ${var.local_keys_directory}/${aws_route53_record.chef_server.fqdn}-${var.chef_user["username"]}.pem"
       }
       provisioner "local-exec" {
-        command = "rsync -a -e \"ssh -i ${var.instance_key} -o StrictHostKeyChecking=no\" --rsync-path=\"sudo rsync\" centos@${aws_eip.chef_server_eip.public_ip}:/opt/chef-keys/${var.chef_org["short_name"]}-validator.pem ${var.local_keys_directory}/${aws_route53_record.chef_server.fqdn}-${var.chef_org["short_name"]}-validator.pem"
+        command = "rsync -a -e \"ssh -i ${var.instance_key} -o StrictHostKeyChecking=no\" --rsync-path=\"sudo rsync\" centos@${aws_instance.chef_server.public_ip}:/opt/chef-keys/${var.chef_org["short_name"]}-validator.pem ${var.local_keys_directory}/${aws_route53_record.chef_server.fqdn}-${var.chef_org["short_name"]}-validator.pem"
       }
   }
 
@@ -221,9 +231,10 @@ resource "null_resource" "deposit_reporting_token" {
     count = var.update_knife_override ? 1 : 0
     depends_on = [ "null_resource.chef_preparation", "null_resource.harvest_key" ]
     connection {
-      host        ="${aws_eip.chef_server_eip.public_ip}"
-      user           = "centos"
-      private_key    = "${file("${var.instance_key}")}"
+      host        ="${aws_instance.chef_server.public_ip}"
+      user        = "centos"
+      agent       = true
+      #private_key = "${file("${var.instance_key}")}"
       }
 
       # Update knife-override.rb, and fetch the Chef server's self signed SSL certificate
@@ -264,14 +275,7 @@ resource "aws_route53_record" "a2_server" {
   name    = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-automate"
   type    = "A"
   ttl     = "60"
-  records = ["${aws_eip.a2_server_eip.public_ip}"]
-}
-
-# A2 server Elastic IP
-resource "aws_eip" "a2_server_eip" {
-  instance = "${aws_instance.a2_server.id}"
-  depends_on = ["aws_instance.a2_server"]
-  vpc      = true
+  records = ["${aws_instance.a2_server.public_ip}"]
 }
 
 # Set up A2 license file
@@ -286,7 +290,15 @@ data "template_file" "a2_license" {
 data "template_file" "enable_bldr_toml" {
   template = "${file("${path.module}/files/enable_bldr.toml.tpl")}"
   vars = {
-    bldr_fqdn = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-bldr.chef-demo.com"
+    bldr_fqdn = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-bldr.${var.domain}"
+  }
+}
+
+# Set up certgen.conf
+data "template_file" "a2_server_certgen_conf" {
+  template = "${file("${path.module}/files/certgen.conf.tpl")}"
+  vars = {
+    fqdn = "${aws_route53_record.a2_server.fqdn}"
   }
 }
 
@@ -324,9 +336,10 @@ resource "null_resource" "a2_preparation" {
     }
 
     connection {
-      host        ="${aws_eip.a2_server_eip.public_ip}"
-      user           = "centos"
-      private_key    = "${file("${var.instance_key}")}"
+      host        ="${aws_instance.a2_server.public_ip}"
+      user        = "centos"
+      agent       = true
+      #private_key = "${file("${var.instance_key}")}"
       }
 
     # Write /tmp/a2_license
@@ -353,14 +366,24 @@ resource "null_resource" "a2_preparation" {
       destination    = "/tmp/enable_bldr.toml"
     }
 
+    # Write certgen.conf
+    provisioner "file" {
+      content        = "${data.template_file.a2_server_certgen_conf.rendered}"
+      destination    = "/tmp/certgen.conf"
+    }
+
     # Install Automate 2
     provisioner "remote-exec" {
       inline = [
         "sudo yum install -y epel-release",
         "sudo yum install -y jq",
+        "sudo mkdir /opt/chef-ssl && sudo chmod 755 /opt/chef-ssl",
+        "cd /opt/chef-ssl",
+        "sudo openssl req -new -x509 -nodes -keyout a2_server.key -out a2_server.pem -config /tmp/certgen.conf",
+        "sudo chmod 600 /opt/chef-ssl/a2_server.pem /opt/chef-ssl/a2_server.key",
         "cd /tmp",
         "curl -s https://packages.chef.io/files/current/latest/chef-automate-cli/chef-automate_linux_amd64.zip | gunzip - > chef-automate && chmod +x chef-automate",
-        "sudo ./chef-automate init-config --fqdn ${aws_route53_record.a2_server.fqdn}",
+        "sudo ./chef-automate init-config --fqdn ${aws_route53_record.a2_server.fqdn} --certificate /opt/chef-ssl/a2_server.pem --private-key /opt/chef-ssl/a2_server.key",
         "sudo /usr/sbin/sysctl -w vm.max_map_count=262144",
         "sudo /usr/sbin/sysctl -w vm.dirty_expire_centisecs=20000",
         "echo 'vm.max_map_count=262144' | sudo tee -a /etc/sysctl.conf",
@@ -369,7 +392,7 @@ resource "null_resource" "a2_preparation" {
         "bash /tmp/a2_license_apply.sh",
         "sudo rm /tmp/a2_license_apply.sh",
         "sudo rm /tmp/a2_license",
-        "export TOK=`sudo chef-automate admin-token`",
+        "export TOK=`sudo chef-automate iam token create admin_token --admin`",
         "curl -sk -H \"api-token: $TOK\" -H \"Content-Type: application/json\" -d '{\"description\":\"Reporting Token - ${aws_route53_record.chef_server.fqdn}\",\"active\":true}' https://${aws_route53_record.a2_server.fqdn}/api/v0/auth/tokens | jq -r .value > /tmp/reporting_token",
         "sudo chown centos /tmp/reporting_token",
         "sudo chmod 600 /tmp/reporting_token",
@@ -389,14 +412,15 @@ resource "null_resource" "harvest_reporting_token" {
   depends_on = [ "null_resource.a2_preparation" ]
 
     connection {
-      host        ="${aws_eip.a2_server_eip.public_ip}"
-      user           = "centos"
-      private_key    = "${file("${var.instance_key}")}"
+      host        ="${aws_instance.a2_server.public_ip}"
+      user        = "centos"
+      agent       = true
+      #private_key = "${file("${var.instance_key}")}"
       }
 
       # Copy back reporting token
       provisioner "local-exec" {
-        command = "scp -o stricthostkeychecking=no -i ${var.instance_key} centos@${aws_eip.a2_server_eip.public_ip}:/tmp/reporting_token /tmp/${aws_route53_record.a2_server.fqdn}_reporting_token.txt"
+        command = "scp -o stricthostkeychecking=no -i ${var.instance_key} centos@${aws_instance.a2_server.public_ip}:/tmp/reporting_token /tmp/${aws_route53_record.a2_server.fqdn}_reporting_token.txt"
       }
 
       # Remove harvested file and initial credentials file.
@@ -423,23 +447,15 @@ resource "aws_route53_record" "bldr_server" {
   name    = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-bldr"
   type    = "A"
   ttl     = "60"
-  records = ["${aws_eip.bldr_server_eip[count.index].public_ip}"]
-}
-
-# Bldr server Elastic IP
-resource "aws_eip" "bldr_server_eip" {
-  count = var.provision_bldr ? 1 : 0
-  instance = "${aws_instance.bldr_server[count.index].id}"
-  depends_on = ["aws_instance.bldr_server"]
-  vpc      = true
+  records = ["${aws_instance.bldr_server[count.index].public_ip}"]
 }
 
 # Set up Bldr's bldr.env file
 data "template_file" "bldr_env" {
   template = "${file("${path.module}/files/bldr.env.tpl")}"
   vars = {
-    bldr_fqdn = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-bldr.chef-demo.com"
-    a2_fqdn   = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-automate.chef-demo.com"
+    bldr_fqdn = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-bldr.${var.domain}"
+    a2_fqdn   = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-automate.${var.domain}"
   }
 }
 
@@ -447,7 +463,7 @@ data "template_file" "bldr_env" {
 data "template_file" "populate_bldr" {
   template = "${file("${path.module}/files/populate_bldr.sh.tpl")}"
   vars = {
-    bldr_fqdn = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-bldr.chef-demo.com"
+    bldr_fqdn = "${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-bldr.${var.domain}"
   }
 }
 
@@ -487,9 +503,10 @@ resource "null_resource" "bldr_preparation" {
     }
 
     connection {
-      host        ="${aws_eip.bldr_server_eip[count.index].public_ip}"
-      user           = "centos"
-      private_key    = "${file("${var.instance_key}")}"
+      host        ="${aws_instance.bldr_server[count.index].public_ip}"
+      user        = "centos"
+      agent       = true
+      #private_key = "${file("${var.instance_key}")}"
       }
 
     # Write bldr.env so that bldr can be installed
@@ -528,15 +545,16 @@ resource "null_resource" "bldr_preparation_2" {
     }
 
     connection {
-      host        ="${aws_eip.bldr_server_eip[count.index].public_ip}"
-      user           = "centos"
-      private_key    = "${file("${var.instance_key}")}"
+      host        ="${aws_instance.bldr_server[count.index].public_ip}"
+      user        = "centos"
+      agent       = true
+      #private_key = "${file("${var.instance_key}")}"
       }
 
   # Harvest A2 SSL cert and restart Bldr
   provisioner "remote-exec" {
     inline = [
-      "openssl s_client -showcerts -connect ${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-automate.chef-demo.com:443 </dev/null 2>/dev/null|openssl x509 -outform PEM | sudo tee -a $(hab pkg path core/cacerts)/ssl/cert.pem",
+      "openssl s_client -showcerts -connect ${lookup(var.common_tags, "X-Contact")}-${lookup(var.common_tags, "X-Project")}-automate.${var.domain}:443 </dev/null 2>/dev/null|openssl x509 -outform PEM | sudo tee -a $(hab pkg path core/cacerts)/ssl/cert.pem",
       "sudo systemctl restart hab-sup",
     ]
   }
