@@ -3,7 +3,7 @@
 ###############
 # Region
 variable "region" {
-  default = "us-east-2" # Ohio
+  default = "us-west-2" # Oregon
 }
 
 variable "bldr_server_instance_type" {
